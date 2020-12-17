@@ -21,3 +21,6 @@ class InvalidAccount(BankError):
 
 class NotEnoughMoney(DeviceError):
     pass
+
+class CardEjectFail(DeviceError):
+    pass

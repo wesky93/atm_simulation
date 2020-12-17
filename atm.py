@@ -3,14 +3,16 @@ from typing import List, Optional
 
 from statemachine import State, StateMachine
 
-from errors import InvalidAccount, InvalidPinNumber, InvalidRequest, NotEnoughMoney, UnSuportedCard
+from bank import BaseBankAPI
+from device import BaseDeviceAPI
+from errors import CardEjectFail, InvalidAccount, InvalidPinNumber, InvalidRequest, NotEnoughMoney, UnSuportedCard
 from typed import Account, Card
 
 logger = logging.getLogger(__name__)
 
 
 def mask_card_number(card_number: str):
-    masked = ['*' for _ in len(card_number[4:])]
+    masked = ['*' for _ in range(len(card_number[4:]))]
     return card_number[:4] + ''.join(masked)
 
 
@@ -29,8 +31,8 @@ class ATMStateMachine(StateMachine):
 
     ## Action
     insert_card = ready.to(card_inserted)
-    check_pin_number = insert_card.to(pin_checked)
-    get_account_list = check_pin_number.to(check_pin_number)
+    check_pin_number = card_inserted.to(pin_checked)
+    get_account_list = pin_checked.to(pin_checked)
     select_account = pin_checked.to(account_selected)
 
     check_balance = account_selected.to(account_selected)
@@ -71,22 +73,28 @@ class BaseAtmAPI():
     def finish(self, **kwargs):
         self.state_machine.finish()
 
+    def need_fix(self, **kwargs):
+        self.state_machine.need_fix()
+
 
 class ATM(BaseAtmAPI):
 
-    def __init__(self, device_api=None, bank_api=None, **kwargs):
+    def __init__(self, device_api: BaseDeviceAPI = None, bank_api: BaseBankAPI = None, **kwargs):
         super(ATM, self).__init__(**kwargs)
         self.device = device_api
         self.bank = bank_api
 
+        self.__init_data()
+
+    def __init_data(self):
         self.card: Optional[Card] = None
         self._account_list: Optional[List[Account]] = None
         self.account: Optional[Account] = None
 
-    def insert_card(self, card_data):
+    def insert_card(self, card_number: str):
         super(ATM, self).insert_card()
 
-        self.card = Card(**card_data)
+        self.card = Card(number=card_number)
         logger.debug(f'card<{mask_card_number(self.card.number)}> is inserted')
 
         try:
@@ -111,18 +119,18 @@ class ATM(BaseAtmAPI):
         return self._account_list
 
     def select_account(self, account: Account):
-        super(ATM, self).select_account()
         if account not in self._account_list:
             raise InvalidAccount()
+        super(ATM, self).select_account()
         self.account = account
 
     def check_balance(self, **kwargs) -> int:
         super().check_balance(**kwargs)
         return self.bank.check_balance(self.account)
 
-    def withdraw(self, amount:int):
+    def withdraw(self, amount: int):
         super().withdraw()
-        if not self.device.withdraw_avaliable(amount):
+        if not self.device.withdraw_available(amount):
             raise NotEnoughMoney()
 
         if self.bank.withdraw(self.account, amount):
@@ -138,17 +146,15 @@ class ATM(BaseAtmAPI):
             self.device.withdraw(amount)
         logger.debug(f'{self.account} deposit successfully')
 
-    def _reset_data(self):
-        self.card = None
-        self._account_list = None
-        self.account = None
-
     def finish(self):
         super(ATM, self).finish()
         try:
             self.device.card_eject()
             logger.debug(f'card<{mask_card_number(self.card.number)}> is eject')
-            self._reset_data()
         except Exception as e:
             logger.exception(e)
             self.state_machine.need_fix()
+            raise CardEjectFail()
+        finally:
+            self.__init_data()
+
